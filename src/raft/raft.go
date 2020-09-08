@@ -85,7 +85,6 @@ type RequestVoteReply struct {
 	// Your data here (2A).
 	Term        int
 	VoteGranted bool
-	// peer ?
 }
 
 type AppendEntriesReply struct {
@@ -116,12 +115,12 @@ type Raft struct {
 
 	nextIndex  []int
 	matchIndex []int
-	stop       chan bool // use to detect wheter raft need stop signal or not
 
+	stop chan bool        // use to detect wheter raft need stop signal or not
+	c    chan interface{} // use to store message like heartbeat or appendlog
 }
 
-// return currentTerm and whether this server
-// believes it is the leader.
+// GetState return currentTerm and whether this server believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
 	var term int
@@ -136,6 +135,13 @@ func (rf *Raft) GetState() (int, bool) {
 	}
 
 	return term, isleader
+}
+
+// GetNodeState return current state of the Raft node
+func (rf *Raft) GetNodeState() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.state
 }
 
 // set state of the raft node
@@ -372,7 +378,7 @@ func afterBetween(min time.Duration, max time.Duration) <-chan time.Time {
 
 func (rf *Raft) loop() {
 	defer DPrintf("server end")
-	state, _ := rf.GetState()
+	state := rf.GetNodeState()
 	for state != Stopped {
 		DPrintf("current state is %d", state)
 		switch state {
@@ -383,13 +389,13 @@ func (rf *Raft) loop() {
 		case Candidate:
 			rf.leaderLoop()
 		}
-		state, _ = rf.GetState()
+		state = rf.GetNodeState()
 	}
 
 }
 
 func (rf *Raft) leaderLoop() {
-	state, _ := rf.GetState()
+	state := rf.GetNodeState()
 
 	for state == Leader {
 
@@ -397,7 +403,7 @@ func (rf *Raft) leaderLoop() {
 
 }
 func (rf *Raft) candidateLoop() {
-	state, _ := rf.GetState()
+	state := rf.GetNodeState()
 
 	doVote := true
 	// used to static votes number
@@ -450,6 +456,10 @@ func (rf *Raft) candidateLoop() {
 			votesGranted++
 		case <-rf.stop:
 			rf.SetState(Stopped)
+		case message := <-rf.c:
+			switch message.(type) {
+			//
+			}
 		case <-timeoutChan:
 			doVote = true
 		}
@@ -458,9 +468,8 @@ func (rf *Raft) candidateLoop() {
 
 }
 func (rf *Raft) followerLoop() {
-	state, _ := rf.GetState()
+	state := rf.GetNodeState()
 	timeoutChan := afterBetween(DefaultElectionTimeout, DefaultElectionTimeout*2)
-	heartbeatChan := time.After(DefaultHeartbeatInterval)
 
 	for state == Follower {
 		select {
@@ -468,10 +477,9 @@ func (rf *Raft) followerLoop() {
 			// TODO: stop this raft node
 			rf.SetState(Stopped)
 			return
-		case <-heartbeatChan:
-			// receive heartbeat message, reset the heartbeat Timer and Candidate Timer
+			// case <-heartbeatChan:
+			// receive heartbeat message, reset the Candidate Timer
 			timeoutChan = afterBetween(DefaultElectionTimeout, DefaultElectionTimeout*2)
-			heartbeatChan = time.After(DefaultHeartbeatInterval)
 		case <-timeoutChan:
 			rf.SetState(Candidate)
 		}
