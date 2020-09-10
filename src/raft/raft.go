@@ -249,6 +249,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, c chan *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	rf.c <- reply
 	return ok
 }
 
@@ -398,7 +399,11 @@ func (rf *Raft) leaderLoop() {
 	state := rf.GetNodeState()
 
 	for state == Leader {
-
+		select {
+		case <-rf.c:
+		case <-rf.stop:
+			rf.SetState(Stopped)
+		}
 	}
 
 }
@@ -407,7 +412,7 @@ func (rf *Raft) candidateLoop() {
 
 	doVote := true
 	// used to static votes number
-	votesGranted := 0
+	votesGranted := 1
 	var respChan chan *RequestVoteReply
 	// time ticker for cadidation
 	var timeoutChan <-chan time.Time
@@ -421,8 +426,6 @@ func (rf *Raft) candidateLoop() {
 			rf.mu.Unlock()
 
 			for peer := range rf.peers {
-				// TODO: delete there
-				print(peer)
 				rf.mu.Lock()
 				var arg *RequestVoteArgs
 				arg.CandidatedID = rf.me
@@ -430,14 +433,11 @@ func (rf *Raft) candidateLoop() {
 				rf.mu.Unlock()
 				var reply *RequestVoteReply
 				go func(peer int) {
-					if ok := rf.sendRequestVote(peer, arg, reply, respChan); !ok {
-						// try again to send vote request
-						DPrintf("vote")
-						// we must sure that we send request successfully
-						ok := rf.sendRequestVote(peer, arg, reply, respChan)
-						for !ok {
-							ok = rf.sendRequestVote(peer, arg, reply, respChan)
-						}
+					ok := rf.sendRequestVote(peer, arg, reply, respChan)
+					// we must sure that we send request successfully
+					for !ok {
+						ok = rf.sendRequestVote(peer, arg, reply, respChan)
+						DPrintf("vote ", peer)
 					}
 				}(peer)
 			}
@@ -462,6 +462,7 @@ func (rf *Raft) candidateLoop() {
 			}
 		case <-timeoutChan:
 			doVote = true
+			votesGranted = 1
 		}
 
 	}
@@ -470,6 +471,7 @@ func (rf *Raft) candidateLoop() {
 func (rf *Raft) followerLoop() {
 	state := rf.GetNodeState()
 	timeoutChan := afterBetween(DefaultElectionTimeout, DefaultElectionTimeout*2)
+	heartbeatChan := time.After(DefaultHeartbeatInterval)
 
 	for state == Follower {
 		select {
@@ -477,8 +479,8 @@ func (rf *Raft) followerLoop() {
 			// TODO: stop this raft node
 			rf.SetState(Stopped)
 			return
-			// case <-heartbeatChan:
-			// receive heartbeat message, reset the Candidate Timer
+		// receive heartbeat message, reset the Candidate Timer
+		case <-heartbeatChan:
 			timeoutChan = afterBetween(DefaultElectionTimeout, DefaultElectionTimeout*2)
 		case <-timeoutChan:
 			rf.SetState(Candidate)
